@@ -45,13 +45,15 @@ ensure_env_file_exists()
 load_dotenv(override=True)
 
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import json
+import io
+import struct
 
-from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
+from tts_engine import generate_speech_from_api, generate_speech_stream, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
 
 # Create FastAPI app
 app = FastAPI(
@@ -82,6 +84,15 @@ class SpeechRequest(BaseModel):
     voice: str = DEFAULT_VOICE
     response_format: str = "wav"
     speed: float = 1.0
+
+class StreamingSpeechRequest(BaseModel):
+    input: str
+    model: str = "orpheus"
+    voice: str = DEFAULT_VOICE
+    response_format: str = "wav"
+    speed: float = 1.0
+    buffer_size: int = 40  # Number of token groups to buffer before streaming
+    chunk_padding_ms: int = 5  # Padding between audio chunks in milliseconds
 
 class APIResponse(BaseModel):
     status: str
@@ -139,6 +150,78 @@ async def list_voices():
         content={
             "status": "ok",
             "voices": AVAILABLE_VOICES
+        }
+    )
+
+# New streaming endpoint
+@app.post("/v1/audio/speech/stream")
+async def create_speech_stream_api(request: StreamingSpeechRequest):
+    """
+    Generate streaming speech from text using the Orpheus TTS model.
+    Returns audio chunks as they are generated for lower latency.
+    
+    Compatible with OpenAI's streaming audio interface pattern.
+    """
+    if not request.input:
+        raise HTTPException(status_code=400, detail="Missing input text")
+    
+    print(f"Starting streaming TTS for: '{request.input[:50]}{'...' if len(request.input) > 50 else ''}'")
+    print(f"Voice: {request.voice}, Buffer: {request.buffer_size}, Padding: {request.chunk_padding_ms}ms")
+    
+    def generate_wav_header(sample_rate=24000, num_channels=1, bits_per_sample=16):
+        """Generate WAV header for streaming audio."""
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        
+        # WAV header (we'll update data size later)
+        header = bytearray()
+        header.extend(b'RIFF')
+        header.extend((0).to_bytes(4, 'little'))  # File size placeholder
+        header.extend(b'WAVE')
+        header.extend(b'fmt ')
+        header.extend((16).to_bytes(4, 'little'))  # fmt chunk size
+        header.extend((1).to_bytes(2, 'little'))   # PCM format
+        header.extend(num_channels.to_bytes(2, 'little'))
+        header.extend(sample_rate.to_bytes(4, 'little'))
+        header.extend(byte_rate.to_bytes(4, 'little'))
+        header.extend(block_align.to_bytes(2, 'little'))
+        header.extend(bits_per_sample.to_bytes(2, 'little'))
+        header.extend(b'data')
+        header.extend((0).to_bytes(4, 'little'))  # Data size placeholder
+        
+        return bytes(header)
+    
+    def audio_stream():
+        """Generator function for streaming audio chunks."""
+        try:
+            # Send WAV header first
+            wav_header = generate_wav_header()
+            yield wav_header
+            
+            # Generate and stream audio chunks
+            audio_generator = generate_speech_stream(
+                text=request.input,
+                voice=request.voice,
+                buffer_size=request.buffer_size,
+                padding_ms=request.chunk_padding_ms
+            )
+            
+            for audio_chunk in audio_generator:
+                if audio_chunk:
+                    yield audio_chunk
+                    
+        except Exception as e:
+            print(f"Error in streaming generator: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f"attachment; filename={request.voice}_stream.wav",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
         }
     )
 

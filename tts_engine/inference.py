@@ -790,6 +790,255 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
     
     return all_audio_segments
 
+def apply_audio_fade(audio_chunk: np.ndarray, sample_rate: int, fade_ms: int = 3) -> np.ndarray:
+    """Apply linear fade-in and fade-out to audio chunk for smooth transitions."""
+    if fade_ms <= 0:
+        return audio_chunk
+        
+    num_fade_samples = int(sample_rate * (fade_ms / 1000.0))
+    
+    if num_fade_samples <= 0 or audio_chunk.size < 3 * num_fade_samples:
+        return audio_chunk
+    
+    # Create fade curves
+    fade_in = np.linspace(0.0, 1.0, num_fade_samples, dtype=audio_chunk.dtype)
+    fade_out = np.linspace(1.0, 0.0, num_fade_samples, dtype=audio_chunk.dtype)
+    
+    # Apply fades
+    chunk_copy = audio_chunk.copy()
+    chunk_copy[:num_fade_samples] *= fade_in
+    chunk_copy[-num_fade_samples:] *= fade_out
+    
+    return chunk_copy
+
+def generate_speech_stream(
+    text: str, 
+    voice: str = DEFAULT_VOICE, 
+    buffer_size: int = 5, 
+    padding_ms: int = 0,
+    temperature: float = TEMPERATURE,
+    top_p: float = TOP_P,
+    max_tokens: int = MAX_TOKENS,
+    repetition_penalty: float = REPETITION_PENALTY
+):
+    """
+    Generate streaming audio chunks from text using the Orpheus TTS model.
+    
+    Args:
+        text: Input text to convert to speech
+        voice: Voice to use for synthesis
+        buffer_size: Number of token groups to accumulate before streaming (affects latency vs quality)
+        padding_ms: Milliseconds of silence to add between chunks
+        temperature: LLM temperature parameter
+        top_p: LLM top_p parameter  
+        max_tokens: Maximum tokens to generate
+        repetition_penalty: LLM repetition penalty
+        
+    Yields:
+        bytes: WAV audio chunk data
+    """
+    if not text.strip():
+        print("Warning: generate_speech_stream called with empty text")
+        return
+        
+    print(f"Starting streaming TTS: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+    print(f"Voice: {voice}, Buffer: {buffer_size} groups, Padding: {padding_ms}ms")
+    
+    # Calculate silence samples for padding
+    silence_samples = 0
+    silence_bytes = b""
+    if padding_ms > 0:
+        silence_samples = int(SAMPLE_RATE * (padding_ms / 1000.0))
+        silence_bytes = (np.zeros(silence_samples, dtype=np.int16)).tobytes()
+    
+    # Generate tokens using streaming API
+    try:
+        token_generator = generate_tokens_from_api(
+            text, voice, temperature, top_p, max_tokens, repetition_penalty
+        )
+        
+        # Use the streaming token decoder with custom buffer size
+        audio_generator = tokens_decoder_sync_streaming(token_generator, buffer_size=buffer_size)
+        
+        chunk_count = 0
+        for audio_chunk in audio_generator:
+            if audio_chunk and len(audio_chunk) > 0:
+                # Convert bytes to numpy array for processing
+                audio_np = np.frombuffer(audio_chunk, dtype=np.int16)
+                
+                # Apply fade for smooth transitions
+                faded_audio = apply_audio_fade(audio_np, SAMPLE_RATE, fade_ms=3)
+                
+                # Convert back to bytes
+                processed_chunk = faded_audio.astype(np.int16).tobytes()
+                
+                yield processed_chunk
+                chunk_count += 1
+                
+                # Add padding between chunks (except for first chunk)
+                if padding_ms > 0 and chunk_count > 1:
+                    yield silence_bytes
+                    
+        print(f"Streaming completed: {chunk_count} audio chunks generated")
+        
+    except Exception as e:
+        print(f"Error in streaming TTS: {e}")
+        import traceback
+        traceback.print_exc()
+
+def tokens_decoder_sync_streaming(syn_token_gen, buffer_size=40):
+    """
+    Streaming version of tokens_decoder_sync optimized for real-time audio generation.
+    
+    Args:
+        syn_token_gen: Synchronous token generator from LLM API
+        buffer_size: Number of token groups to accumulate before streaming
+        
+    Yields:
+        bytes: Raw audio bytes for immediate streaming
+    """
+    # Use larger queue for high-end systems
+    queue_size = 100 if HIGH_END_GPU else 50
+    audio_queue = queue.Queue(maxsize=queue_size)
+    
+    # Thread synchronization
+    producer_done_event = threading.Event()
+    producer_started_event = threading.Event()
+    
+    # Convert the synchronous token generator into an async generator with batching
+    async def async_token_gen():
+        batch_size = 32 if HIGH_END_GPU else 16
+        batch = []
+        for token in syn_token_gen:
+            batch.append(token)
+            if len(batch) >= batch_size:
+                for t in batch:
+                    yield t
+                batch = []
+        # Process any remaining tokens
+        for t in batch:
+            yield t
+
+    async def async_producer():
+        start_time = time.time()
+        chunk_count = 0
+        
+        try:
+            producer_started_event.set()
+            
+            # Use modified token decoder with streaming parameters
+            async for audio_chunk in tokens_decoder_streaming(async_token_gen(), buffer_size):
+                if audio_chunk:
+                    audio_queue.put(audio_chunk)
+                    chunk_count += 1
+                    
+                    # Log performance periodically
+                    if chunk_count % 5 == 0:  # More frequent logging for streaming
+                        elapsed = time.time() - start_time
+                        if elapsed > 0:
+                            chunks_per_sec = chunk_count / elapsed
+                            print(f"Streaming rate: {chunks_per_sec:.2f} chunks/second")
+                        
+        except Exception as e:
+            print(f"Error in streaming producer: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            producer_done_event.set()
+            audio_queue.put(None)  # Sentinel
+
+    def run_async():
+        asyncio.run(async_producer())
+
+    # Start producer thread
+    thread = threading.Thread(target=run_async, name="StreamingTokenProcessor")
+    thread.daemon = True
+    thread.start()
+    
+    # Wait for producer to start
+    producer_started_event.wait(timeout=5.0)
+    
+    # Stream audio chunks as they become available
+    while True:
+        try:
+            audio = audio_queue.get(timeout=0.1)
+            
+            if audio is None:  # End of stream
+                break
+                
+            yield audio
+            
+        except queue.Empty:
+            # Check if producer is done and queue is empty
+            if producer_done_event.is_set() and audio_queue.empty():
+                break
+            continue
+    
+    # Ensure thread completion
+    if thread.is_alive():
+        thread.join(timeout=5.0)
+
+async def tokens_decoder_streaming(token_gen, buffer_size=40):
+    """
+    Streaming token decoder optimized for low-latency audio generation.
+    
+    Args:
+        token_gen: Async token generator
+        buffer_size: Number of token groups before starting to stream
+        
+    Yields:
+        bytes: Audio chunk bytes
+    """
+    buffer = []
+    count = 0
+    
+    # Streaming parameters
+    first_chunk_processed = False
+    min_frames_first = max(7, buffer_size // 6)  # Smaller initial buffer for first chunk
+    min_frames_subsequent = buffer_size * 7  # Full buffer size for subsequent chunks
+    process_every = 7  # Process every 7 tokens
+    
+    print(f"Streaming decoder: First={min_frames_first}, Subsequent={min_frames_subsequent}, Every={process_every}")
+    
+    async for token_text in token_gen:
+        # Import here to avoid circular imports
+        from .speechpipe import turn_token_into_id, convert_to_audio
+        
+        token = turn_token_into_id(token_text, count)
+        
+        if token is not None and token > 0:
+            buffer.append(token)
+            count += 1
+            
+            # First chunk logic - prioritize low latency
+            if not first_chunk_processed:
+                if count >= min_frames_first:
+                    buffer_to_proc = buffer[-min_frames_first:]
+                    print(f"Processing first streaming chunk: {len(buffer_to_proc)} tokens")
+                    
+                    audio_samples = convert_to_audio(buffer_to_proc, count)
+                    if audio_samples is not None:
+                        first_chunk_processed = True
+                        yield audio_samples
+            else:
+                # Subsequent chunks - balance quality and latency
+                if count % process_every == 0 and len(buffer) >= min_frames_subsequent:
+                    buffer_to_proc = buffer[-min_frames_subsequent:]
+                    
+                    audio_samples = convert_to_audio(buffer_to_proc, count)
+                    if audio_samples is not None:
+                        yield audio_samples
+    
+    # Process any remaining tokens
+    if len(buffer) >= min_frames_first:
+        final_buffer = buffer[-min_frames_first:]
+        print(f"Processing final streaming chunk: {len(final_buffer)} tokens")
+        
+        from .speechpipe import convert_to_audio
+        audio_samples = convert_to_audio(final_buffer, count)
+        if audio_samples is not None:
+            yield audio_samples
+
 def stitch_wav_files(input_files, output_file, crossfade_ms=50):
     """Stitch multiple WAV files together with crossfading for smooth transitions."""
     if not input_files:
