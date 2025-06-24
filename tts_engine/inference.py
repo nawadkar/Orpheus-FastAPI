@@ -790,27 +790,6 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
     
     return all_audio_segments
 
-def apply_audio_fade(audio_chunk: np.ndarray, sample_rate: int, fade_ms: int = 3) -> np.ndarray:
-    """Apply linear fade-in and fade-out to audio chunk for smooth transitions."""
-    if fade_ms <= 0:
-        return audio_chunk
-        
-    num_fade_samples = int(sample_rate * (fade_ms / 1000.0))
-    
-    if num_fade_samples <= 0 or audio_chunk.size < 3 * num_fade_samples:
-        return audio_chunk
-    
-    # Create fade curves
-    fade_in = np.linspace(0.0, 1.0, num_fade_samples, dtype=audio_chunk.dtype)
-    fade_out = np.linspace(1.0, 0.0, num_fade_samples, dtype=audio_chunk.dtype)
-    
-    # Apply fades
-    chunk_copy = audio_chunk.copy()
-    chunk_copy[:num_fade_samples] *= fade_in
-    chunk_copy[-num_fade_samples:] *= fade_out
-    
-    return chunk_copy
-
 def generate_speech_stream(
     text: str, 
     voice: str = DEFAULT_VOICE, 
@@ -845,7 +824,6 @@ def generate_speech_stream(
     print(f"Voice: {voice}, Buffer: {buffer_size} groups, Padding: {padding_ms}ms")
     
     # Calculate silence samples for padding
-    silence_samples = 0
     silence_bytes = b""
     if padding_ms > 0:
         silence_samples = int(SAMPLE_RATE * (padding_ms / 1000.0))
@@ -863,16 +841,8 @@ def generate_speech_stream(
         chunk_count = 0
         for audio_chunk in audio_generator:
             if audio_chunk and len(audio_chunk) > 0:
-                # Convert bytes to numpy array for processing
-                audio_np = np.frombuffer(audio_chunk, dtype=np.int16)
-                
-                # Apply fade for smooth transitions
-                faded_audio = apply_audio_fade(audio_np, SAMPLE_RATE, fade_ms=3)
-                
-                # Convert back to bytes
-                processed_chunk = faded_audio.astype(np.int16).tobytes()
-                
-                yield processed_chunk
+                # Yield raw audio chunk without any processing
+                yield audio_chunk
                 chunk_count += 1
                 
                 # Add padding between chunks (except for first chunk)

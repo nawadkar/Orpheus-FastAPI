@@ -91,8 +91,7 @@ class StreamingSpeechRequest(BaseModel):
     voice: str = DEFAULT_VOICE
     response_format: str = "wav"
     speed: float = 1.0
-    buffer_size: int = 40  # Number of token groups to buffer before streaming
-    chunk_padding_ms: int = 5  # Padding between audio chunks in milliseconds
+    # Removed buffer_size parameter - will use optimal default internally
 
 class APIResponse(BaseModel):
     status: str
@@ -166,7 +165,7 @@ async def create_speech_stream_api(request: StreamingSpeechRequest):
         raise HTTPException(status_code=400, detail="Missing input text")
     
     print(f"Starting streaming TTS for: '{request.input[:50]}{'...' if len(request.input) > 50 else ''}'")
-    print(f"Voice: {request.voice}, Buffer: {request.buffer_size}, Padding: {request.chunk_padding_ms}ms")
+    print(f"Voice: {request.voice}")
     
     def generate_wav_header(sample_rate=24000, num_channels=1, bits_per_sample=16):
         """Generate WAV header for streaming audio."""
@@ -198,12 +197,12 @@ async def create_speech_stream_api(request: StreamingSpeechRequest):
             wav_header = generate_wav_header()
             yield wav_header
             
-            # Generate and stream audio chunks
+            # Generate and stream audio chunks with optimal buffer size
             audio_generator = generate_speech_stream(
                 text=request.input,
                 voice=request.voice,
-                buffer_size=request.buffer_size,
-                padding_ms=request.chunk_padding_ms
+                buffer_size=5,  # Hardcoded optimal value
+                padding_ms=0
             )
             
             for audio_chunk in audio_generator:

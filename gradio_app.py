@@ -80,10 +80,10 @@ class RealTimeStreamingTester:
         except Exception as e:
             return None, status_msg + f"❌ Unexpected error: {e}"
     
-    def stream_tts_realtime(self, text: str, voice: str, base_url: str, buffer_size: int, padding_ms: int):
+    def stream_tts_realtime(self, text: str, voice: str, base_url: str):
         """Stream TTS with real-time chunked audio playback"""
         if not text.strip():
-            yield None, "❌ Please enter some text", "No audio generated"
+            yield None, "❌ Please enter some text to generate speech.", ""
             return
         
         self.base_url = base_url.rstrip('/')
@@ -91,14 +91,13 @@ class RealTimeStreamingTester:
         
         payload = {
             "input": text,
-            "voice": voice,
-            "buffer_size": buffer_size,
-            "chunk_padding_ms": padding_ms
+            "voice": voice
+            # Removed buffer_size - server uses optimal default
         }
         
         start_time = time.time()
-        status_msg = f"🔄 Starting real-time streaming TTS...\\n"
-        status_msg += f"⚙️ Voice: {voice}, Buffer: {buffer_size}, Padding: {padding_ms}ms\\n"
+        status_msg = f"🔄 Starting real-time streaming TTS...\n"
+        status_msg += f"⚙️ Voice: {voice}\n"  # Removed buffer info
         
         # Reset streaming state
         self.streaming_active = True
@@ -231,81 +230,46 @@ def create_interface():
         gr.Markdown("""
         # 🎤 Orpheus Real-Time Streaming TTS Tester
         
-        This interface tests the Orpheus-FastAPI streaming TTS endpoint with **real-time audio playback**.
+        This interface tests the Orpheus-FastAPI streaming TTS endpoint with **real-time audio playbook**.
         The streaming mode plays audio chunks as they arrive, providing immediate feedback.
         """)
         
         with gr.Row():
-            with gr.Column(scale=2):
+            with gr.Column():
                 text_input = gr.Textbox(
                     label="Text to Synthesize",
-                    placeholder="Enter text to convert to speech...",
-                    value=DEFAULT_TEXT,
-                    lines=3,
-                    max_lines=10
+                    placeholder="Enter text here...",
+                    lines=4,
+                    value=DEFAULT_TEXT
                 )
                 
                 with gr.Row():
                     voice_selector = gr.Dropdown(
                         choices=DEFAULT_VOICES,
-                        label="Voice",
-                        value="tara"
+                        value=DEFAULT_VOICES[0],
+                        label="Voice"
                     )
+                    
                     base_url_input = gr.Textbox(
-                        label="API Base URL",
+                        label="Server URL",
                         value=DEFAULT_BASE_URL,
-                        placeholder="https://your-api-endpoint.com"
+                        placeholder="https://your-server.com"
                     )
-            
-            with gr.Column(scale=1):
-                gr.Markdown("### Streaming Controls")
-                
-                buffer_size_slider = gr.Slider(
-                    minimum=5,
-                    maximum=100,
-                    value=40,
-                    step=5,
-                    label="Buffer Size (token groups)",
-                    info="Higher = better quality, higher latency"
-                )
-                
-                padding_slider = gr.Slider(
-                    minimum=0,
-                    maximum=50,
-                    value=5,
-                    step=1,
-                    label="Chunk Padding (ms)",
-                    info="Silence between audio chunks"
-                )
         
         with gr.Row():
-            with gr.Column():
-                gr.Markdown("### 🎯 Regular TTS (Batch Mode)")
-                regular_btn = gr.Button("🎵 Generate Regular TTS", variant="secondary", size="lg")
-                regular_audio = gr.Audio(label="Regular TTS Output", type="filepath")
-                regular_status = gr.Textbox(
-                    label="Regular TTS Status",
-                    lines=8,
-                    max_lines=15
-                )
+            with gr.Column(scale=1):
+                gr.Markdown("### 🔄 Regular TTS")
+                regular_btn = gr.Button("Generate Regular TTS", variant="secondary")
+                regular_audio = gr.Audio(label="Regular TTS Output", interactive=False)
+                regular_status = gr.Textbox(label="Status", lines=4, interactive=False)
             
-            with gr.Column():
-                gr.Markdown("### ⚡ Streaming TTS (Real-Time Mode)")
-                with gr.Row():
-                    streaming_btn = gr.Button("🚀 Start Real-Time Streaming", variant="primary", size="lg")
-                    stop_btn = gr.Button("🛑 Stop Streaming", variant="stop", size="sm")
-                
-                streaming_audio = gr.Audio(label="Streaming TTS Output (Real-Time)", type="filepath", autoplay=True)
-                streaming_status = gr.Textbox(
-                    label="Streaming Status",
-                    lines=8,
-                    max_lines=15
-                )
-                streaming_info = gr.Textbox(
-                    label="Real-Time Info",
-                    lines=2,
-                    max_lines=3
-                )
+            with gr.Column(scale=1):
+                gr.Markdown("### ⚡ Real-Time Streaming TTS")
+                streaming_btn = gr.Button("Start Streaming TTS", variant="primary")
+                stop_btn = gr.Button("Stop Streaming", variant="stop")
+                streaming_audio = gr.Audio(label="Streaming Audio Output", interactive=False)
+                streaming_status = gr.Textbox(label="Streaming Status", lines=4, interactive=False)
+                streaming_info = gr.Textbox(label="Performance Info", lines=2, interactive=False)
         
         # Event handlers
         regular_btn.click(
@@ -317,9 +281,9 @@ def create_interface():
         
         streaming_btn.click(
             fn=tester.stream_tts_realtime,
-            inputs=[text_input, voice_selector, base_url_input, buffer_size_slider, padding_slider],
+            inputs=[text_input, voice_selector, base_url_input],
             outputs=[streaming_audio, streaming_status, streaming_info],
-            show_progress=False  # Don't show progress bar for streaming
+            show_progress=False
         )
         
         stop_btn.click(
